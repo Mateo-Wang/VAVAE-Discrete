@@ -49,7 +49,7 @@ def adopt_weight(weight, global_step, threshold=0, value=0.):
 
 class VQLoss(nn.Module):
     def __init__(self, disc_start, disc_loss="hinge", disc_dim=64, disc_type='patchgan', image_size=256,
-                 disc_num_layers=3, disc_in_channels=3, disc_weight=1.0, disc_adaptive_weight = False,
+                 disc_num_layers=3, disc_in_channels=3, disc_weight=1.0, disc_adaptive_weight = True,
                  gen_adv_loss='hinge', reconstruction_loss='l2', reconstruction_weight=1.0, 
                  codebook_weight=1.0, perceptual_weight=1.0, vf_weight=0.1, adaptive_vf=True,
                  cos_margin=0.5, distmat_margin=0.25, distmat_weight=1.0, cos_weight=1.0

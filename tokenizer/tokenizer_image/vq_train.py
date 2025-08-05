@@ -103,6 +103,7 @@ def main(args):
         gen_adv_loss=args.gen_loss,
         image_size=args.image_size,
         perceptual_weight=args.perceptual_weight,
+        disc_adaptive_weight=args.adaptive_disc,
         reconstruction_weight=args.reconstruction_weight,
         reconstruction_loss=args.reconstruction_loss,
         codebook_weight=args.codebook_weight,  
@@ -226,7 +227,7 @@ def main(args):
             if writer is not None:
                 if loss_gen_dict is not None:
                     for key, value in loss_gen_dict.items():
-                        writer.add_scalar(key, value, train_steps)
+                        writer.add_scalar(key, float(value), train_steps)
 
             # discriminator training            
             optimizer_disc.zero_grad()
@@ -239,11 +240,12 @@ def main(args):
                 torch.nn.utils.clip_grad_norm_(vq_loss.module.discriminator.parameters(), args.max_grad_norm)
             scaler_disc.step(optimizer_disc)
             scaler_disc.update()
+
             # update tensorboard
             if writer is not None:
                 if loss_disc_dict is not None:
                     for key, value in loss_disc_dict.items():
-                        writer.add_scalar(key, value, train_steps)
+                        writer.add_scalar(key, float(value), train_steps)
             
             # # Log loss values:
             running_loss += loss_gen.item() + loss_disc.item()
@@ -304,7 +306,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-path", type=str, required=True)
     parser.add_argument("--data-face-path", type=str, default=None, help="face datasets to improve vq model")
-    parser.add_argument("--cloud-save-path", type=str, required=True, help='please specify a cloud disk path, if not, local path')
+    parser.add_argument("--cloud-save-path", type=str, default=None, help='please specify a cloud disk path, if not, local path')
     parser.add_argument("--no-local-save", action='store_true', help='no save checkpoints to local path for limited disk volume')
     parser.add_argument("--vq-model", type=str, choices=list(VQ_models.keys()), default="VQ-16")
     parser.add_argument("--vq-ckpt", type=str, default=None, help="ckpt path for resume training")
@@ -319,6 +321,7 @@ if __name__ == "__main__":
     parser.add_argument("--reconstruction-weight", type=float, default=1.0, help="reconstruction loss weight of image pixel")
     parser.add_argument("--reconstruction-loss", type=str, default='l2', help="reconstruction loss type of image pixel")
     parser.add_argument("--perceptual-weight", type=float, default=1.0, help="perceptual loss weight of LPIPS")
+    parser.add_argument("--adaptive-disc", type=bool, default=True, help="if use adaptive disc weight")
     parser.add_argument("--disc-weight", type=float, default=0.5, help="discriminator loss weight for gan training")
     parser.add_argument("--disc-start", type=int, default=20000, help="iteration to start discriminator training and loss")
     parser.add_argument("--disc-type", type=str, choices=['patchgan', 'stylegan'], default='patchgan', help="discriminator type")
