@@ -11,6 +11,7 @@ from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torchvision.datasets import ImageFolder
 from torchvision import transforms
+from torch.utils.tensorboard import SummaryWriter
 
 import os
 import time
@@ -42,7 +43,7 @@ def main(args):
     # Setup DDP:
     init_distributed_mode(args)
     assert args.global_batch_size % dist.get_world_size() == 0, f"Batch size must be divisible by world size."
-    rank = dist.get_rank()
+    rank = dist.get_rank() # every process has a uniqe rank
     device = rank % torch.cuda.device_count()
     seed = args.global_seed * dist.get_world_size() + rank
     torch.manual_seed(seed)
@@ -53,20 +54,23 @@ def main(args):
         os.makedirs(args.results_dir, exist_ok=True)  # Make results folder (holds all experiment subfolders)
         experiment_index = len(glob(f"{args.results_dir}/*"))
         model_string_name = args.vq_model.replace("/", "-")
-        experiment_dir = f"{args.results_dir}/{experiment_index:03d}-{model_string_name}"  # Create an experiment folder
+        time_record = time.strftime("%Y-%m-%d-%H-%M-%S", time.localtime())
+        experiment_dir = f"{args.results_dir}/{experiment_index:03d}-{model_string_name}-{time_record}"  # Create an experiment folder
         checkpoint_dir = f"{experiment_dir}/checkpoints"  # Stores saved model checkpoints
         os.makedirs(checkpoint_dir, exist_ok=True)
         logger = create_logger(experiment_dir)
         logger.info(f"Experiment directory created at {experiment_dir}")
+        tb_dir = os.path.join(experiment_dir, "tensorboard")
+        writer = SummaryWriter(log_dir=tb_dir)
 
-        time_record = time.strftime("%Y-%m-%d-%H-%M-%S", time.localtime())
-        cloud_results_dir = f"{args.cloud_save_path}/{time_record}"
-        cloud_checkpoint_dir = f"{cloud_results_dir}/{experiment_index:03d}-{model_string_name}/checkpoints"
-        os.makedirs(cloud_checkpoint_dir, exist_ok=True)
-        logger.info(f"Experiment directory created in cloud at {cloud_checkpoint_dir}")
+        # cloud_results_dir = f"{args.cloud_save_path}/{time_record}"
+        # cloud_checkpoint_dir = f"{cloud_results_dir}/{experiment_index:03d}-{model_string_name}/checkpoints"
+        # os.makedirs(cloud_checkpoint_dir, exist_ok=True)
+        # logger.info(f"Experiment directory created in cloud at {cloud_checkpoint_dir}")
     
     else:
         logger = create_logger(None)
+        writer = None
 
     # training args
     logger.info(f"{args}")
@@ -81,6 +85,8 @@ def main(args):
         commit_loss_beta=args.commit_loss_beta,
         entropy_loss_ratio=args.entropy_loss_ratio,
         dropout_p=args.dropout_p,
+        use_vf = args.use_vf,
+        reverse_proj = args.reverse_proj
     )
     logger.info(f"VQ Model Parameters: {sum(p.numel() for p in vq_model.parameters()):,}")
     if args.ema:
@@ -100,7 +106,14 @@ def main(args):
         reconstruction_weight=args.reconstruction_weight,
         reconstruction_loss=args.reconstruction_loss,
         codebook_weight=args.codebook_weight,  
+        vf_weight = args.vf_weight,
+        adaptive_vf= args.adaptive_vf,
+        cos_margin = args.cos_margin,
+        distmat_margin= args.distmat_margin,
+        distmat_weight = args.distmat_weight,
+        cos_weight = args.cos_weight   
     ).to(device)
+
     logger.info(f"Discriminator Parameters: {sum(p.numel() for p in vq_loss.discriminator.parameters()):,}")
 
     # initialize a GradScaler. If enabled=False scaler is a no-op
@@ -190,10 +203,17 @@ def main(args):
             # generator training
             optimizer.zero_grad()
             with torch.cuda.amp.autocast(dtype=ptdtype):  
-                recons_imgs, codebook_loss = vq_model(imgs)
-                loss_gen = vq_loss(codebook_loss, imgs, recons_imgs, optimizer_idx=0, global_step=train_steps+1, 
+                if args.use_vf is not None:
+                    # vq_loss needs z, aux_feature, enc_last_layer for vf_loss
+                    recons_imgs, codebook_loss, z, aux_feature = vq_model(imgs)
+                    encoder_last_layer = vq_model.module.encoder.last_layer
+                else:
+                    recons_imgs, codebook_loss = vq_model(imgs)
+                    z, aux_feature, encoder_last_layer = None, None, None
+                loss_gen, loss_gen_dict = vq_loss(codebook_loss, imgs, recons_imgs, optimizer_idx=0, global_step=train_steps+1, 
                                    last_layer=vq_model.module.decoder.last_layer, 
-                                   logger=logger, log_every=args.log_every)
+                                   logger=logger, log_every=args.log_every,
+                                   z=z, aux_feature=aux_feature, enc_last_layer=encoder_last_layer)
             scaler.scale(loss_gen).backward()
             if args.max_grad_norm != 0.0:
                 scaler.unscale_(optimizer)
@@ -202,11 +222,16 @@ def main(args):
             scaler.update()
             if args.ema:
                 update_ema(ema, vq_model.module._orig_mod if args.compile else vq_model.module)
+            # update tensorboard
+            if writer is not None:
+                if loss_gen_dict is not None:
+                    for key, value in loss_gen_dict.items():
+                        writer.add_scalar(key, value, train_steps)
 
             # discriminator training            
             optimizer_disc.zero_grad()
             with torch.cuda.amp.autocast(dtype=ptdtype):
-                loss_disc = vq_loss(codebook_loss, imgs, recons_imgs, optimizer_idx=1, global_step=train_steps+1,
+                loss_disc, loss_disc_dict = vq_loss(codebook_loss, imgs, recons_imgs, optimizer_idx=1, global_step=train_steps+1,
                                     logger=logger, log_every=args.log_every)
             scaler_disc.scale(loss_disc).backward()
             if args.max_grad_norm != 0.0:
@@ -214,6 +239,11 @@ def main(args):
                 torch.nn.utils.clip_grad_norm_(vq_loss.module.discriminator.parameters(), args.max_grad_norm)
             scaler_disc.step(optimizer_disc)
             scaler_disc.update()
+            # update tensorboard
+            if writer is not None:
+                if loss_disc_dict is not None:
+                    for key, value in loss_disc_dict.items():
+                        writer.add_scalar(key, value, train_steps)
             
             # # Log loss values:
             running_loss += loss_gen.item() + loss_disc.item()
@@ -257,11 +287,11 @@ def main(args):
                         torch.save(checkpoint, checkpoint_path)
                         logger.info(f"Saved checkpoint to {checkpoint_path}")
                     
-                    cloud_checkpoint_path = f"{cloud_checkpoint_dir}/{train_steps:07d}.pt"
-                    torch.save(checkpoint, cloud_checkpoint_path)
-                    logger.info(f"Saved checkpoint in cloud to {cloud_checkpoint_path}")
+                    # cloud_checkpoint_path = f"{cloud_checkpoint_dir}/{train_steps:07d}.pt"
+                    # torch.save(checkpoint, cloud_checkpoint_path)
+                    # logger.info(f"Saved checkpoint in cloud to {cloud_checkpoint_path}")
                 dist.barrier()
-
+    writer.close()
     vq_model.eval()  # important! This disables randomized embedding dropout
     # do any sampling/FID calculation/etc. with ema (or model) in eval mode ...
 
@@ -293,7 +323,15 @@ if __name__ == "__main__":
     parser.add_argument("--disc-start", type=int, default=20000, help="iteration to start discriminator training and loss")
     parser.add_argument("--disc-type", type=str, choices=['patchgan', 'stylegan'], default='patchgan', help="discriminator type")
     parser.add_argument("--disc-loss", type=str, choices=['hinge', 'vanilla', 'non-saturating'], default='hinge', help="discriminator loss")
-    parser.add_argument("--gen-loss", type=str, choices=['hinge', 'non-saturating'], default='hinge', help="generator loss for gan training")
+    parser.add_argument("--gen-loss", type=str, choices=['hinge', 'non-saturating'], default='hinge', help="generator loss for gan training")  
+    parser.add_argument("--vf-weight", type=float, default=0.1, help="vf loss weight")
+    parser.add_argument("--adaptive-vf", action='store_true', default=True, help="adaptive vf")
+    parser.add_argument("--cos-margin", type=float, default=0.5, help="cos margin")
+    parser.add_argument("--distmat-margin", type=float, default=0.25, help="distmat margin")
+    parser.add_argument("--distmat-weight", type=float, default=1.0, help="distmat weight")
+    parser.add_argument("--cos-weight", type=float, default=1.0, help="cos weight")
+    parser.add_argument("--use-vf", type=str, default='dinov2', help="aux fundation model type")
+    parser.add_argument("--reverse-proj", type=bool, default=False, help="if project aux_feature to z")
     parser.add_argument("--compile", action='store_true', default=False)
     parser.add_argument("--dropout-p", type=float, default=0.0, help="dropout_p")
     parser.add_argument("--results-dir", type=str, default="results_tokenizer_image")
@@ -305,12 +343,12 @@ if __name__ == "__main__":
     parser.add_argument("--beta1", type=float, default=0.9, help="The beta1 parameter for the Adam optimizer.")
     parser.add_argument("--beta2", type=float, default=0.95, help="The beta2 parameter for the Adam optimizer.")
     parser.add_argument("--max-grad-norm", default=1.0, type=float, help="Max gradient norm.")
-    parser.add_argument("--global-batch-size", type=int, default=128)
+    parser.add_argument("--global-batch-size", type=int, default=32)
     parser.add_argument("--global-seed", type=int, default=0)
     parser.add_argument("--num-workers", type=int, default=16)
     parser.add_argument("--log-every", type=int, default=100)
     parser.add_argument("--ckpt-every", type=int, default=5000)
-    parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
     parser.add_argument("--mixed-precision", type=str, default='bf16', choices=["none", "fp16", "bf16"]) 
     args = parser.parse_args()
     main(args)

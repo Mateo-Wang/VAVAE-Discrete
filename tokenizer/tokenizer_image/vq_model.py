@@ -7,6 +7,7 @@ from typing import List
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from .fundation_models import aux_foundation_model
 
 
 @dataclass
@@ -22,6 +23,9 @@ class ModelArgs:
     decoder_ch_mult: List[int] = field(default_factory=lambda: [1, 1, 2, 2, 4])
     z_channels: int = 256
     dropout_p: float = 0.0
+    # vf loss setting
+    use_vf: str = 'dinov2'
+    reverse_proj: bool = False
 
 
 
@@ -37,12 +41,27 @@ class VQModel(nn.Module):
                                         config.codebook_l2_norm, config.codebook_show_usage)
         self.quant_conv = nn.Conv2d(config.z_channels, config.codebook_embed_dim, 1)
         self.post_quant_conv = nn.Conv2d(config.codebook_embed_dim, config.z_channels, 1)
+        # for vf_loss
+        if config.use_vf is not None:
+            self.use_vf = config.use_vf
+            self.aux_model = aux_foundation_model(config.use_vf)
+            vf_feature_dim = self.aux_model.feature_dim
+            if config.reverse_proj:
+                self.linear_proj = torch.nn.Conv2d(vf_feature_dim, config.z_channels, kernel_size=1, bias=False)
+            else:
+                self.linear_proj = torch.nn.Conv2d(config.z_channels, vf_feature_dim, kernel_size=1, bias=False)
+        else:
+            self.use_vf = None
+        self.reverse_proj = config.reverse_proj
 
     def encode(self, x):
-        h = self.encoder(x)
-        h = self.quant_conv(h)
+        z = self.encoder(x)
+        h = self.quant_conv(z)
         quant, emb_loss, info = self.quantize(h)
-        return quant, emb_loss, info
+        if self.use_vf is not None:
+            return quant, emb_loss, z, info
+        else:
+            return quant, emb_loss, info
 
     def decode(self, quant):
         quant = self.post_quant_conv(quant)
@@ -55,9 +74,19 @@ class VQModel(nn.Module):
         return dec
 
     def forward(self, input):
-        quant, diff, _ = self.encode(input)
-        dec = self.decode(quant)
-        return dec, diff
+        if self.use_vf is not None:
+            quant, diff, z, _ = self.encode(input)
+            aux_feature = self.aux_model(input)
+            dec = self.decode(quant)
+            if self.reverse_proj:
+                aux_feature = self.linear_proj(aux_feature)
+            else:
+                z = self.linear_proj(z)
+            return dec, diff, z, aux_feature
+        else:
+            quant, diff, _ = self.encode(input)
+            dec = self.decode(quant)
+            return dec, diff
 
 
 
@@ -101,7 +130,10 @@ class Encoder(nn.Module):
         self.norm_out = Normalize(block_in, norm_type)
         self.conv_out = nn.Conv2d(block_in, z_channels, kernel_size=3, stride=1, padding=1)
 
-
+    @property
+    def last_layer(self):
+        return self.conv_out.weight
+    
     def forward(self, x):
         h = self.conv_in(x)
         # downsampling

@@ -57,7 +57,8 @@ def main(args):
     # create and load model
     vq_model = VQ_models[args.vq_model](
         codebook_size=args.codebook_size,
-        codebook_embed_dim=args.codebook_embed_dim)
+        codebook_embed_dim=args.codebook_embed_dim,
+        use_vf=args.use_vf)
     vq_model.to(device)
     vq_model.eval()
     checkpoint = torch.load(args.vq_ckpt, map_location="cpu")
@@ -69,7 +70,7 @@ def main(args):
         model_weight = checkpoint["state_dict"]
     else:
         raise Exception("please check model weight")
-    vq_model.load_state_dict(model_weight)
+    vq_model.load_state_dict(model_weight, strict=False)
     del checkpoint
 
     # Create folder to save samples:
@@ -185,13 +186,14 @@ if __name__ == "__main__":
     parser.add_argument("--dataset", type=str, choices=['imagenet', 'coco'], default='imagenet')
     parser.add_argument("--vq-model", type=str, choices=list(VQ_models.keys()), default="VQ-16")
     parser.add_argument("--vq-ckpt", type=str, default=None, help="ckpt path for vq model")
+    parser.add_argument("--use-vf", type=str, default=None, help="the fundation model used to aux vae")
     parser.add_argument("--codebook-size", type=int, default=16384, help="codebook size for vector quantization")
     parser.add_argument("--codebook-embed-dim", type=int, default=8, help="codebook dimension for vector quantization")
     parser.add_argument("--image-size", type=int, choices=[256, 384, 512], default=256)
     parser.add_argument("--image-size-eval", type=int, choices=[256, 384, 512], default=256)
-    parser.add_argument("--sample-dir", type=str, default="reconstructions")
-    parser.add_argument("--per-proc-batch-size", type=int, default=32)
+    parser.add_argument("--sample-dir", type=str, default="reconstruction/vq_reconstruction/85000_vf/")
+    parser.add_argument("--per-proc-batch-size", type=int, default=4)
     parser.add_argument("--global-seed", type=int, default=0)
-    parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--num-workers", type=int, default=8)
     args = parser.parse_args()
     main(args)

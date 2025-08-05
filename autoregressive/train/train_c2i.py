@@ -71,17 +71,17 @@ def main(args):
         os.makedirs(args.results_dir, exist_ok=True)  # Make results folder (holds all experiment subfolders)
         experiment_index = len(glob(f"{args.results_dir}/*"))
         model_string_name = args.gpt_model.replace("/", "-")  # e.g., GPT-XL/2 --> GPT-XL-2 (for naming folders)
-        experiment_dir = f"{args.results_dir}/{experiment_index:03d}-{model_string_name}"  # Create an experiment folder
+        time_record = time.strftime("%Y-%m-%d-%H-%M-%S", time.localtime())
+        experiment_dir = f"{args.results_dir}/{experiment_index:03d}-{model_string_name}-{time_record}"  # Create an experiment folder
         checkpoint_dir = f"{experiment_dir}/checkpoints"  # Stores saved model checkpoints
         os.makedirs(checkpoint_dir, exist_ok=True)
         logger = create_logger(experiment_dir)
         logger.info(f"Experiment directory created at {experiment_dir}")
 
-        time_record = time.strftime("%Y-%m-%d-%H-%M-%S", time.localtime())
-        cloud_results_dir = f"{args.cloud_save_path}/{time_record}"
-        cloud_checkpoint_dir = f"{cloud_results_dir}/{experiment_index:03d}-{model_string_name}/checkpoints"
-        os.makedirs(cloud_checkpoint_dir, exist_ok=True)
-        logger.info(f"Experiment directory created in cloud at {cloud_checkpoint_dir}")
+        # cloud_results_dir = f"{args.cloud_save_path}/{time_record}"
+        # cloud_checkpoint_dir = f"{cloud_results_dir}/{experiment_index:03d}-{model_string_name}/checkpoints"
+        # os.makedirs(cloud_checkpoint_dir, exist_ok=True)
+        # logger.info(f"Experiment directory created in cloud at {cloud_checkpoint_dir}")
     
     else:
         logger = create_logger(None)
@@ -244,9 +244,9 @@ def main(args):
                         torch.save(checkpoint, checkpoint_path)
                         logger.info(f"Saved checkpoint to {checkpoint_path}")
                     
-                    cloud_checkpoint_path = f"{cloud_checkpoint_dir}/{train_steps:07d}.pt"
-                    torch.save(checkpoint, cloud_checkpoint_path)
-                    logger.info(f"Saved checkpoint in cloud to {cloud_checkpoint_path}")
+                    # cloud_checkpoint_path = f"{cloud_checkpoint_dir}/{train_steps:07d}.pt"
+                    # torch.save(checkpoint, cloud_checkpoint_path)
+                    # logger.info(f"Saved checkpoint in cloud to {cloud_checkpoint_path}")
                 dist.barrier()
 
     model.eval()  # important! This disables randomized embedding dropout
@@ -278,14 +278,14 @@ if __name__ == "__main__":
     parser.add_argument("--downsample-size", type=int, choices=[8, 16], default=16)
     parser.add_argument("--num-classes", type=int, default=1000)
     parser.add_argument("--epochs", type=int, default=300)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--weight-decay", type=float, default=5e-2, help="Weight decay to use")
     parser.add_argument("--beta1", type=float, default=0.9, help="beta1 parameter for the Adam optimizer")
     parser.add_argument("--beta2", type=float, default=0.95, help="beta2 parameter for the Adam optimizer")
     parser.add_argument("--max-grad-norm", default=1.0, type=float, help="Max gradient norm.")
-    parser.add_argument("--global-batch-size", type=int, default=256)
+    parser.add_argument("--global-batch-size", type=int, default=512)
     parser.add_argument("--global-seed", type=int, default=0)
-    parser.add_argument("--num-workers", type=int, default=24)
+    parser.add_argument("--num-workers", type=int, default=48)
     parser.add_argument("--log-every", type=int, default=100)
     parser.add_argument("--ckpt-every", type=int, default=5000)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=1)

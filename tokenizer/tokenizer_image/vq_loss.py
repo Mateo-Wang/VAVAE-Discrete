@@ -4,6 +4,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from einops import rearrange
 
 from tokenizer.tokenizer_image.lpips import LPIPS
 from tokenizer.tokenizer_image.discriminator_patchgan import NLayerDiscriminator as PatchGANDiscriminator
@@ -50,7 +51,8 @@ class VQLoss(nn.Module):
     def __init__(self, disc_start, disc_loss="hinge", disc_dim=64, disc_type='patchgan', image_size=256,
                  disc_num_layers=3, disc_in_channels=3, disc_weight=1.0, disc_adaptive_weight = False,
                  gen_adv_loss='hinge', reconstruction_loss='l2', reconstruction_weight=1.0, 
-                 codebook_weight=1.0, perceptual_weight=1.0, 
+                 codebook_weight=1.0, perceptual_weight=1.0, vf_weight=0.1, adaptive_vf=True,
+                 cos_margin=0.5, distmat_margin=0.25, distmat_weight=1.0, cos_weight=1.0
     ):
         super().__init__()
         # discriminator loss
@@ -106,6 +108,15 @@ class VQLoss(nn.Module):
         # codebook loss
         self.codebook_weight = codebook_weight
 
+        # VF loss
+        self.vf_weight = vf_weight
+        self.adaptive_vf = adaptive_vf
+        self.cos_margin = cos_margin
+        self.distmat_margin = distmat_margin
+        self.distmat_weight = distmat_weight
+        self.cos_weight = cos_weight
+
+
     def calculate_adaptive_weight(self, nll_loss, g_loss, last_layer):
         nll_grads = torch.autograd.grad(nll_loss, last_layer, retain_graph=True)[0]
         g_grads = torch.autograd.grad(g_loss, last_layer, retain_graph=True)[0]
@@ -113,9 +124,18 @@ class VQLoss(nn.Module):
         d_weight = torch.norm(nll_grads) / (torch.norm(g_grads) + 1e-4)
         d_weight = torch.clamp(d_weight, 0.0, 1e4).detach()
         return d_weight.detach()
+    
+    def calculate_adaptive_weight_vf(self, nll_loss, vf_loss, last_layer):
+        nll_grads = torch.autograd.grad(nll_loss, last_layer, retain_graph=True)[0]
+        vf_grads = torch.autograd.grad(vf_loss, last_layer, retain_graph=True)[0]
+
+        vf_weight = torch.norm(nll_grads) / (torch.norm(vf_grads) + 1e-4)
+        vf_weight = torch.clamp(vf_weight, 0.0, 1e8).detach()
+        vf_weight = vf_weight * self.vf_weight
+        return vf_weight.detach()
 
     def forward(self, codebook_loss, inputs, reconstructions, optimizer_idx, global_step, last_layer=None, 
-                logger=None, log_every=100):
+                logger=None, log_every=100, z=None, aux_feature=None, enc_last_layer=None):
         # generator update
         if optimizer_idx == 0:
             # reconstruction loss
@@ -124,6 +144,21 @@ class VQLoss(nn.Module):
             # perceptual loss
             p_loss = self.perceptual_loss(inputs.contiguous(), reconstructions.contiguous())
             p_loss = torch.mean(p_loss)
+
+            # vf loss
+            if z is not None and aux_feature is not None:
+                z_flat = rearrange(z, 'b c h w -> b c (h w)')
+                aux_feature_flat = rearrange(aux_feature, 'b c h w -> b c (h w)')
+                z_norm = torch.nn.functional.normalize(z_flat, dim=1)
+                aux_feature_norm = torch.nn.functional.normalize(aux_feature_flat, dim=1)
+                z_cos_sim = torch.einsum('bci,bcj->bij', z_norm, z_norm)
+                aux_feature_cos_sim = torch.einsum('bci,bcj->bij', aux_feature_norm, aux_feature_norm)
+                diff = torch.abs(z_cos_sim - aux_feature_cos_sim)
+                vf_loss_1 = torch.nn.functional.relu(diff-self.distmat_margin).mean()
+                vf_loss_2 = torch.nn.functional.relu(1 - self.cos_margin - torch.nn.functional.cosine_similarity(aux_feature, z)).mean()
+                vf_loss = vf_loss_1 * self.distmat_weight + vf_loss_2 * self.cos_weight
+            else:
+                vf_loss = None
 
             # discriminator loss
             logits_fake = self.discriminator(reconstructions.contiguous())
@@ -135,21 +170,49 @@ class VQLoss(nn.Module):
             else:
                 disc_adaptive_weight = 1
             disc_weight = adopt_weight(self.disc_weight, global_step, threshold=self.discriminator_iter_start)
+
+            if vf_loss is not None:
+                if self.adaptive_vf:
+                    null_loss = self.rec_weight * rec_loss + self.perceptual_weight * p_loss
+                    vf_weight = self.calculate_adaptive_weight_vf(null_loss, vf_loss, last_layer=enc_last_layer)
+                else:
+                    vf_weight = self.vf_weight
+                loss = self.rec_weight * rec_loss + \
+                    self.perceptual_weight * p_loss + \
+                    disc_adaptive_weight * disc_weight * generator_adv_loss + \
+                    codebook_loss[0] + codebook_loss[1] + codebook_loss[2] + \
+                    vf_weight * vf_loss
+            else:
+                loss = self.rec_weight * rec_loss + \
+                    self.perceptual_weight * p_loss + \
+                    disc_adaptive_weight * disc_weight * generator_adv_loss + \
+                    codebook_loss[0] + codebook_loss[1] + codebook_loss[2]
             
-            loss = self.rec_weight * rec_loss + \
-                self.perceptual_weight * p_loss + \
-                disc_adaptive_weight * disc_weight * generator_adv_loss + \
-                codebook_loss[0] + codebook_loss[1] + codebook_loss[2]
-            
+            loss_dict = None
             if global_step % log_every == 0:
                 rec_loss = self.rec_weight * rec_loss
                 p_loss = self.perceptual_weight * p_loss
                 generator_adv_loss = disc_adaptive_weight * disc_weight * generator_adv_loss
+                vf_loss = vf_weight * vf_loss
                 logger.info(f"(Generator) rec_loss: {rec_loss:.4f}, perceptual_loss: {p_loss:.4f}, "
                             f"vq_loss: {codebook_loss[0]:.4f}, commit_loss: {codebook_loss[1]:.4f}, entropy_loss: {codebook_loss[2]:.4f}, "
                             f"codebook_usage: {codebook_loss[3]:.4f}, generator_adv_loss: {generator_adv_loss:.4f}, "
-                            f"disc_adaptive_weight: {disc_adaptive_weight:.4f}, disc_weight: {disc_weight:.4f}")
-            return loss
+                            f"disc_adaptive_weight: {disc_adaptive_weight:.4f}, disc_weight: {disc_weight:.4f}, "
+                            f"vf_weight: {vf_weight:.4f}, vf_loss: {vf_loss:.4f}")
+                
+                # add tensorboard 
+                if vf_loss is not None:
+                    loss_dict = {"rec_loss": rec_loss, "perceptual_loss": p_loss, "vq_loss": codebook_loss[0],
+                     "commit_loss": codebook_loss[1], "entropy_loss": codebook_loss[2], "codebook_usage": codebook_loss[3],
+                      "generator_adv_loss": generator_adv_loss, "disc_adaptive_weight": disc_adaptive_weight,
+                       "disc_weight": disc_weight, "vf_weight": vf_weight, "vf_loss": vf_loss}
+                else: 
+                    loss_dict = {"rec_loss": rec_loss, "perceptual_loss": p_loss, "vq_loss": codebook_loss[0],
+                     "commit_loss": codebook_loss[1], "entropy_loss": codebook_loss[2], "codebook_usage": codebook_loss[3],
+                      "generator_adv_loss": generator_adv_loss, "disc_adaptive_weight": disc_adaptive_weight,
+                       "disc_weight": disc_weight}
+
+            return loss, loss_dict
 
         # discriminator update
         if optimizer_idx == 1:
@@ -159,10 +222,14 @@ class VQLoss(nn.Module):
             disc_weight = adopt_weight(self.disc_weight, global_step, threshold=self.discriminator_iter_start)
             d_adversarial_loss = disc_weight * self.disc_loss(logits_real, logits_fake)
             
+            d_loss_dict = None
             if global_step % log_every == 0:
                 logits_real = logits_real.detach().mean()
                 logits_fake = logits_fake.detach().mean()
                 logger.info(f"(Discriminator) " 
                             f"discriminator_adv_loss: {d_adversarial_loss:.4f}, disc_weight: {disc_weight:.4f}, "
                             f"logits_real: {logits_real:.4f}, logits_fake: {logits_fake:.4f}")
-            return d_adversarial_loss
+                # add tensorboard
+                d_loss_dict = {"discriminator_adv_loss": d_adversarial_loss, "disc_weight": disc_weight,
+                                 "logits_real": logits_real, "logits_fake": logits_fake}
+            return d_adversarial_loss, d_loss_dict
