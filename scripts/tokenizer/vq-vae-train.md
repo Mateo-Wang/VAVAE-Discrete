@@ -9,7 +9,7 @@
 1. 训练vq-vae脚本（想要尝试--adaptive-disc的两种设置，看哪种效果好）
 
    ```bash
-   bash scripts/tokenizer/train_vq.sh --data-path /path/to/imagenet-1k/train/  --result-dir /path/to/save/checkpoint --adaptive-disc True/or False
+   bash scripts/tokenizer/train_vq.sh --data-path /path/to/imagenet-1k/train/  --results-dir /path/to/save/checkpoint --adaptive-disc False --use-vf "dinov2"
    ```
 
 2. 用训练好的vq-vae得到验证集上的重建结果，会得到重建后的图片和一个npz文件

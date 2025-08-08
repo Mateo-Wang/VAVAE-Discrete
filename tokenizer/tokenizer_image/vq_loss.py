@@ -193,20 +193,21 @@ class VQLoss(nn.Module):
                 rec_loss = self.rec_weight * rec_loss
                 p_loss = self.perceptual_weight * p_loss
                 generator_adv_loss = disc_adaptive_weight * disc_weight * generator_adv_loss
-                vf_loss = vf_weight * vf_loss
-                logger.info(f"(Generator) rec_loss: {rec_loss:.4f}, perceptual_loss: {p_loss:.4f}, "
+                if vf_loss is not None:
+                    logger.info(f"(Generator) rec_loss: {rec_loss:.4f}, perceptual_loss: {p_loss:.4f}, "
                             f"vq_loss: {codebook_loss[0]:.4f}, commit_loss: {codebook_loss[1]:.4f}, entropy_loss: {codebook_loss[2]:.4f}, "
                             f"codebook_usage: {codebook_loss[3]:.4f}, generator_adv_loss: {generator_adv_loss:.4f}, "
                             f"disc_adaptive_weight: {disc_adaptive_weight:.4f}, disc_weight: {disc_weight:.4f}, "
                             f"vf_weight: {vf_weight:.4f}, vf_loss: {vf_loss:.4f}")
-                
-                # add tensorboard 
-                if vf_loss is not None:
                     loss_dict = {"rec_loss": rec_loss, "perceptual_loss": p_loss, "vq_loss": codebook_loss[0],
                      "commit_loss": codebook_loss[1], "entropy_loss": codebook_loss[2], "codebook_usage": codebook_loss[3],
                       "generator_adv_loss": generator_adv_loss, "disc_adaptive_weight": disc_adaptive_weight,
                        "disc_weight": disc_weight, "vf_weight": vf_weight, "vf_loss": vf_loss}
-                else: 
+                else:
+                    logger.info(f"(Generator) rec_loss: {rec_loss:.4f}, perceptual_loss: {p_loss:.4f}, "
+                            f"vq_loss: {codebook_loss[0]:.4f}, commit_loss: {codebook_loss[1]:.4f}, entropy_loss: {codebook_loss[2]:.4f}, "
+                            f"codebook_usage: {codebook_loss[3]:.4f}, generator_adv_loss: {generator_adv_loss:.4f}, "
+                            f"disc_adaptive_weight: {disc_adaptive_weight:.4f}, disc_weight: {disc_weight:.4f}")
                     loss_dict = {"rec_loss": rec_loss, "perceptual_loss": p_loss, "vq_loss": codebook_loss[0],
                      "commit_loss": codebook_loss[1], "entropy_loss": codebook_loss[2], "codebook_usage": codebook_loss[3],
                       "generator_adv_loss": generator_adv_loss, "disc_adaptive_weight": disc_adaptive_weight,
