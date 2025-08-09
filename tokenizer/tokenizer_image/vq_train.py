@@ -321,7 +321,7 @@ if __name__ == "__main__":
     parser.add_argument("--reconstruction-weight", type=float, default=1.0, help="reconstruction loss weight of image pixel")
     parser.add_argument("--reconstruction-loss", type=str, default='l2', help="reconstruction loss type of image pixel")
     parser.add_argument("--perceptual-weight", type=float, default=1.0, help="perceptual loss weight of LPIPS")
-    parser.add_argument("--adaptive-disc", type=bool, default=False, help="if use adaptive disc weight")
+    parser.add_argument("--adaptive-disc", action="store_true", help="if use adaptive disc weight")
     parser.add_argument("--disc-weight", type=float, default=0.5, help="discriminator loss weight for gan training")
     parser.add_argument("--disc-start", type=int, default=20000, help="iteration to start discriminator training and loss")
     parser.add_argument("--disc-type", type=str, choices=['patchgan', 'stylegan'], default='patchgan', help="discriminator type")
